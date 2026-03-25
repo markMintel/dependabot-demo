@@ -1,4 +1,3 @@
----
 version: 2
 updates:
   - package-ecosystem: "github-actions"
@@ -6,17 +5,24 @@ updates:
     schedule:
       interval: "weekly"
     target-branch: "develop"
-    branch-name-prefix: "feature/dependabot"
-  - package-ecosystem: npm
+    pull-request-branch-name:
+      prefix: "feature/dependabot"
+      separator: "/"
+
+  - package-ecosystem: "npm"
     directory: "/javascript"
     schedule:
       interval: "weekly"
     target-branch: "develop"
-    branch-name-prefix: "feature/dependabot"
-  - package-ecosystem: bundler
+    pull-request-branch-name:
+      prefix: "feature/dependabot"
+      separator: "/"
+
+  - package-ecosystem: "bundler"
     directory: "/ruby"
     schedule:
       interval: "weekly"
     target-branch: "develop"
-    branch-name-prefix: "feature/dependabot"
-    
+    pull-request-branch-name:
+      prefix: "feature/dependabot"
+      separator: "/"
