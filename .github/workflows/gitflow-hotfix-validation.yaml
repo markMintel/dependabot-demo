@@ -1,0 +1,172 @@
+name: GitFlow - Hotfix Branch Validation
+
+on:
+  pull_request:
+    branches:
+      - master
+      - develop
+
+jobs:
+  validate-hotfix-branch:
+    name: Validate Hotfix Branch Rules
+    runs-on: cp-ubuntu22.04-amd64-1core-1gb
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check branch naming convention
+        run: |
+          SOURCE_BRANCH="${{ github.head_ref }}"
+          TARGET_BRANCH="${{ github.base_ref }}"
+          
+          # Only validate if source is a hotfix branch
+          if [[ "$SOURCE_BRANCH" =~ ^hotfix/.+ ]]; then
+            echo "✅ Valid hotfix branch name: $SOURCE_BRANCH"
+            
+            # Hotfix branches can merge to master or develop
+            if [[ "$TARGET_BRANCH" == "master" ]] || [[ "$TARGET_BRANCH" == "develop" ]]; then
+              echo "✅ Valid target branch for hotfix: $TARGET_BRANCH"
+            else
+              echo "❌ Hotfix branches can only merge to 'master' or 'develop'"
+              echo "Current target: $TARGET_BRANCH"
+              exit 1
+            fi
+          else
+            echo "⏭️  Not a hotfix branch, skipping validation"
+            exit 0
+          fi
+
+      - name: Validate hotfix branch origin (merging to master)
+        if: github.base_ref == 'master'
+        run: |
+          SOURCE_BRANCH="${{ github.head_ref }}"
+          
+          # Check if this is a hotfix branch
+          if [[ ! "$SOURCE_BRANCH" =~ ^hotfix/.+ ]]; then
+            echo "⏭️  Not a hotfix branch, skipping"
+            exit 0
+          fi
+          
+          # Find the merge base between the hotfix branch and master
+          MERGE_BASE=$(git merge-base refs/remotes/origin/$SOURCE_BRANCH refs/remotes/origin/master)
+          
+          # Check if master is an ancestor of the hotfix branch
+          if git merge-base --is-ancestor refs/remotes/origin/master $MERGE_BASE; then
+            echo "✅ Hotfix branch '$SOURCE_BRANCH' was properly created from master"
+          else
+            echo "❌ Hotfix branch '$SOURCE_BRANCH' was NOT created from master"
+            echo "Hotfix branches must be created from the master branch to fix production issues"
+            echo ""
+            echo "To fix this:"
+            echo "  1. Create a new hotfix branch from master: git checkout master && git pull && git checkout -b hotfix/issue-description"
+            echo "  2. Cherry-pick your commits or rebase onto master"
+            exit 1
+          fi
+
+      - name: Validate hotfix merged to master first (merging to develop)
+        if: github.base_ref == 'develop'
+        run: |
+          SOURCE_BRANCH="${{ github.head_ref }}"
+          
+          # Check if this is a hotfix branch
+          if [[ ! "$SOURCE_BRANCH" =~ ^hotfix/.+ ]]; then
+            echo "⏭️  Not a hotfix branch, skipping"
+            exit 0
+          fi
+          
+          # Check if the hotfix branch has been merged to master
+          if git merge-base --is-ancestor refs/remotes/origin/$SOURCE_BRANCH refs/remotes/origin/master; then
+            echo "✅ Hotfix branch '$SOURCE_BRANCH' has been merged to master"
+            echo "Safe to merge hotfix changes to develop"
+          else
+            echo "❌ Hotfix branch '$SOURCE_BRANCH' has NOT been merged to master yet"
+            echo "Hotfix branches must be merged to master before merging to develop"
+            echo ""
+            echo "GitFlow Process:"
+            echo "  1. First merge hotfix/* to master"
+            echo "  2. Then merge hotfix/* to develop to sync the fix"
+            exit 1
+          fi
+
+      - name: Comment PR with validation results
+        uses: actions/github-script@v6.4.0
+        if: always()
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const sourceBranch = "${{ github.head_ref }}";
+            const targetBranch = "${{ github.base_ref }}";
+            const conclusion = "${{ job.status }}";
+            
+            if (!sourceBranch.startsWith('hotfix/')) {
+              return;
+            }
+            
+            let output = "";
+            
+            if (conclusion === "success") {
+              output = `### GitFlow Hotfix Branch Validation ✅
+            
+            **Branch Type:** Hotfix
+            **Source Branch:** \`${sourceBranch}\`
+            **Target Branch:** \`${targetBranch}\`
+            
+            `;
+              
+              if (targetBranch === 'master') {
+                output += `✅ Branch follows naming convention \`hotfix/*\`
+            ✅ Branch was created from \`master\`
+            ✅ Ready to merge to \`master\`
+            
+            **Next Steps After Merge:**
+            1. Open a PR to merge this hotfix branch to develop`;
+              } else if (targetBranch === 'develop') {
+                output += `✅ Branch follows naming convention \`hotfix/*\`
+            ✅ Hotfix has been merged to \`master\` first
+            ✅ Ready to sync hotfix changes to \`develop\``;
+              }
+            } else {
+              // Validation failed
+              output = `### GitFlow Hotfix Branch Validation ❌
+            
+            **Branch Type:** Hotfix
+            **Source Branch:** \`${sourceBranch}\`
+            **Target Branch:** \`${targetBranch}\`
+            
+            ❌ **Validation Failed**
+            
+            `;
+              
+              if (targetBranch === 'master') {
+                output += `This hotfix branch was not created from \`master\`. Hotfix branches must originate from master to fix production issues.
+            
+            **To fix this:**
+            1. Create a new hotfix branch from master:
+               \`\`\`bash
+               git checkout master
+               git pull origin master
+               git checkout -b hotfix/issue-description
+               \`\`\`
+            2. Cherry-pick your commits or apply the fix to the new branch
+            3. Open a new PR to master
+            
+            **GitFlow Rule:** \`hotfix/*\` → \`master\` (must branch from \`master\`)`;
+              } else if (targetBranch === 'develop') {
+                output += `This hotfix branch has not been merged to \`master\` yet. You must merge to master first before syncing to develop.
+            
+            **GitFlow Process:**
+            1. First merge \`${sourceBranch}\` → \`master\`
+            2. Then merge \`${sourceBranch}\` → \`develop\`
+            
+            **GitFlow Rule:** Hotfix branches must merge to \`master\` first, then to \`develop\``;
+              }
+            }
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
