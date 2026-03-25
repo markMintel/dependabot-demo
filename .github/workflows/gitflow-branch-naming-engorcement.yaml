@@ -1,0 +1,227 @@
+name: GitFlow - Branch Naming & Merge Rules Enforcement
+
+on:
+  pull_request:
+    branches:
+      - master
+      - develop
+
+jobs:
+  enforce-gitflow-rules:
+    name: Enforce GitFlow Branch Naming and Merge Rules
+    runs-on: cp-ubuntu22.04-amd64-1core-1gb
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate branch naming convention
+        run: |
+          SOURCE_BRANCH="${{ github.head_ref }}"
+          TARGET_BRANCH="${{ github.base_ref }}"
+          
+          echo "Source Branch: $SOURCE_BRANCH"
+          echo "Target Branch: $TARGET_BRANCH"
+          echo ""
+          
+          # Check if branch follows GitFlow naming conventions
+          if [[ "$SOURCE_BRANCH" =~ ^feature/.+ ]] || \
+             [[ "$SOURCE_BRANCH" =~ ^release/.+ ]] || \
+             [[ "$SOURCE_BRANCH" =~ ^hotfix/.+ ]] || \
+             [[ "$SOURCE_BRANCH" == "develop" ]] || \
+             [[ "$SOURCE_BRANCH" == "master" ]]; then
+            echo "✅ Branch name follows GitFlow conventions"
+          else
+            echo "❌ Invalid branch name: $SOURCE_BRANCH"
+            echo ""
+            echo "Branch name must follow GitFlow naming conventions:"
+            echo "  - feature/* (for new features)"
+            echo "  - release/* (for release preparation)"
+            echo "  - hotfix/* (for production hotfixes)"
+            echo ""
+            echo "Examples:"
+            echo "  - feature/add-user-authentication"
+            echo "  - feature/TICKET-123-new-dashboard"
+            echo "  - release/1.2.0"
+            echo "  - hotfix/fix-login-bug"
+            echo "  - hotfix/TICKET-456-critical-security-patch"
+            exit 1
+          fi
+
+      - name: Prevent direct develop to master merges
+        run: |
+          SOURCE_BRANCH="${{ github.head_ref }}"
+          TARGET_BRANCH="${{ github.base_ref }}"
+          
+          # Block direct merges from develop to master
+          if [[ "$SOURCE_BRANCH" == "develop" ]] && [[ "$TARGET_BRANCH" == "master" ]]; then
+            echo "❌ Direct merges from develop to master are not allowed in GitFlow"
+            echo ""
+            echo "GitFlow Process:"
+            echo "  1. Create a release branch from develop: git checkout -b release/x.x.x develop"
+            echo "  2. Prepare the release (bug fixes, version bumps)"
+            echo "  3. Merge release branch to master"
+            echo "  4. Merge release branch back to develop"
+            echo ""
+            echo "For urgent fixes to production, use hotfix branches instead."
+            exit 1
+          fi
+          
+          echo "✅ Merge path is valid"
+
+      - name: Validate target branch for branch type
+        run: |
+          SOURCE_BRANCH="${{ github.head_ref }}"
+          TARGET_BRANCH="${{ github.base_ref }}"
+          
+          # Feature branches can only merge to develop
+          if [[ "$SOURCE_BRANCH" =~ ^feature/.+ ]]; then
+            if [[ "$TARGET_BRANCH" != "develop" ]]; then
+              echo "❌ Feature branches can only merge to 'develop'"
+              echo "Current target: $TARGET_BRANCH"
+              echo ""
+              echo "Please change the base branch of this PR to 'develop'"
+              exit 1
+            fi
+          fi
+          
+          # Release branches can only merge to master or develop
+          if [[ "$SOURCE_BRANCH" =~ ^release/.+ ]]; then
+            if [[ "$TARGET_BRANCH" != "master" ]] && [[ "$TARGET_BRANCH" != "develop" ]]; then
+              echo "❌ Release branches can only merge to 'master' or 'develop'"
+              echo "Current target: $TARGET_BRANCH"
+              exit 1
+            fi
+          fi
+          
+          # Hotfix branches can only merge to master or develop
+          if [[ "$SOURCE_BRANCH" =~ ^hotfix/.+ ]]; then
+            if [[ "$TARGET_BRANCH" != "master" ]] && [[ "$TARGET_BRANCH" != "develop" ]]; then
+              echo "❌ Hotfix branches can only merge to 'master' or 'develop'"
+              echo "Current target: $TARGET_BRANCH"
+              exit 1
+            fi
+          fi
+          
+          echo "✅ Target branch is valid for this branch type"
+
+      - name: Prevent other branches from merging to master
+        if: github.base_ref == 'master'
+        run: |
+          SOURCE_BRANCH="${{ github.head_ref }}"
+          
+          # Only release and hotfix branches can merge to master
+          if [[ ! "$SOURCE_BRANCH" =~ ^release/.+ ]] && [[ ! "$SOURCE_BRANCH" =~ ^hotfix/.+ ]]; then
+            echo "❌ Only release/* and hotfix/* branches can merge to master"
+            echo "Current branch: $SOURCE_BRANCH"
+            echo ""
+            echo "GitFlow Rules:"
+            echo "  - feature/* → develop only"
+            echo "  - release/* → master (first), then develop"
+            echo "  - hotfix/* → master (first), then develop"
+            exit 1
+          fi
+          
+          echo "✅ Branch type is allowed to merge to master"
+
+      - name: Comment PR with GitFlow validation summary
+        uses: actions/github-script@v6.4.0
+        if: always()
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const sourceBranch = "${{ github.head_ref }}";
+            const targetBranch = "${{ github.base_ref }}";
+            const conclusion = "${{ job.status }}";
+            
+            let branchType = "Unknown";
+            if (sourceBranch.startsWith('feature/')) branchType = "Feature";
+            else if (sourceBranch.startsWith('release/')) branchType = "Release";
+            else if (sourceBranch.startsWith('hotfix/')) branchType = "Hotfix";
+            else if (sourceBranch === 'develop') branchType = "Develop";
+            
+            // Skip commenting if specific validation workflows are handling this case
+            // Those workflows provide more detailed validation (ancestry checks, etc.)
+            if ((branchType === "Feature" && targetBranch === "develop") ||
+                (branchType === "Release" && (targetBranch === "master" || targetBranch === "develop")) ||
+                (branchType === "Hotfix" && (targetBranch === "master" || targetBranch === "develop"))) {
+              console.log(`Skipping comment - specific ${branchType} validation workflow will handle this`);
+              return;
+            }
+            
+            let output = "";
+            
+            if (conclusion === "success") {
+              output = `### GitFlow Enforcement Summary ✅
+            
+            **Source Branch:** \`${sourceBranch}\`
+            **Target Branch:** \`${targetBranch}\`
+            **Branch Type:** ${branchType}
+            
+            ✅ Branch naming follows GitFlow conventions
+            ✅ Merge path is valid for GitFlow workflow
+            ✅ Target branch is appropriate for branch type
+            
+            ---
+            
+            **GitFlow Quick Reference:**
+            - \`feature/*\` → \`develop\`
+            - \`release/*\` → \`master\` then \`develop\`
+            - \`hotfix/*\` → \`master\` then \`develop\`
+            `;
+            } else {
+              // Validation failed - provide specific error message
+              let errorMsg = "";
+              
+              if (branchType === "Feature" && targetBranch === "master") {
+                errorMsg = `❌ **Feature branches cannot merge to master**
+            
+            Feature branches must merge to \`develop\` only.
+            
+            **To fix this PR:**
+            1. Change the base branch to \`develop\`
+            2. After merging to develop, create a \`release/*\` branch to promote to master`;
+              } else if (branchType === "Develop" && targetBranch === "master") {
+                errorMsg = `❌ **Direct develop→master merges are not allowed**
+            
+            Use the GitFlow release process instead:
+            1. Create a release branch: \`git checkout -b release/x.x.x develop\`
+            2. Merge release branch to master
+            3. Merge release branch back to develop`;
+              } else if (!['feature/', 'release/', 'hotfix/'].some(prefix => sourceBranch.startsWith(prefix))) {
+                errorMsg = `❌ **Invalid branch naming convention**
+            
+            Branch \`${sourceBranch}\` does not follow GitFlow naming:
+            - \`feature/*\` for new features
+            - \`release/*\` for releases
+            - \`hotfix/*\` for production fixes`;
+              } else {
+                errorMsg = `❌ **GitFlow validation failed**
+            
+            This PR violates GitFlow branching rules. Check the workflow logs for details.`;
+              }
+              
+              output = `### GitFlow Enforcement Summary ❌
+            
+            **Source Branch:** \`${sourceBranch}\`
+            **Target Branch:** \`${targetBranch}\`
+            **Branch Type:** ${branchType}
+            
+            ${errorMsg}
+            
+            ---
+            
+            **GitFlow Quick Reference:**
+            - \`feature/*\` → \`develop\`
+            - \`release/*\` → \`master\` then \`develop\`
+            - \`hotfix/*\` → \`master\` then \`develop\`
+            `;
+            }
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
