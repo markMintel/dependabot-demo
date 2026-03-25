@@ -1,0 +1,172 @@
+name: GitFlow - Release Branch Validation
+
+on:
+  pull_request:
+    branches:
+      - master
+      - develop
+
+jobs:
+  validate-release-branch:
+    name: Validate Release Branch Rules
+    runs-on: cp-ubuntu22.04-amd64-1core-1gb
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check branch naming convention
+        run: |
+          SOURCE_BRANCH="${{ github.head_ref }}"
+          TARGET_BRANCH="${{ github.base_ref }}"
+          
+          # Only validate if source is a release branch
+          if [[ "$SOURCE_BRANCH" =~ ^release/.+ ]]; then
+            echo "✅ Valid release branch name: $SOURCE_BRANCH"
+            
+            # Release branches can merge to master or develop
+            if [[ "$TARGET_BRANCH" == "master" ]] || [[ "$TARGET_BRANCH" == "develop" ]]; then
+              echo "✅ Valid target branch for release: $TARGET_BRANCH"
+            else
+              echo "❌ Release branches can only merge to 'master' or 'develop'"
+              echo "Current target: $TARGET_BRANCH"
+              exit 1
+            fi
+          else
+            echo "⏭️  Not a release branch, skipping validation"
+            exit 0
+          fi
+
+      - name: Validate release branch origin (merging to master)
+        if: github.base_ref == 'master'
+        run: |
+          SOURCE_BRANCH="${{ github.head_ref }}"
+          
+          # Check if this is a release branch
+          if [[ ! "$SOURCE_BRANCH" =~ ^release/.+ ]]; then
+            echo "⏭️  Not a release branch, skipping"
+            exit 0
+          fi
+          
+          # Find the merge base between the release branch and develop
+          MERGE_BASE=$(git merge-base refs/remotes/origin/$SOURCE_BRANCH refs/remotes/origin/develop)
+          
+          # Check if develop is an ancestor of the release branch
+          if git merge-base --is-ancestor refs/remotes/origin/develop $MERGE_BASE; then
+            echo "✅ Release branch '$SOURCE_BRANCH' was properly created from develop"
+          else
+            echo "❌ Release branch '$SOURCE_BRANCH' was NOT created from develop"
+            echo "Release branches must be created from the develop branch"
+            echo ""
+            echo "To fix this:"
+            echo "  1. Create a new release branch from develop: git checkout develop && git pull && git checkout -b release/x.x.x"
+            echo "  2. Cherry-pick your commits or merge develop into your release branch"
+            exit 1
+          fi
+
+      - name: Validate release merged to master first (merging back to develop)
+        if: github.base_ref == 'develop'
+        run: |
+          SOURCE_BRANCH="${{ github.head_ref }}"
+          
+          # Check if this is a release branch
+          if [[ ! "$SOURCE_BRANCH" =~ ^release/.+ ]]; then
+            echo "⏭️  Not a release branch, skipping"
+            exit 0
+          fi
+          
+          # Check if the release branch has been merged to master
+          if git merge-base --is-ancestor refs/remotes/origin/$SOURCE_BRANCH refs/remotes/origin/master; then
+            echo "✅ Release branch '$SOURCE_BRANCH' has been merged to master"
+            echo "Safe to merge release changes back to develop"
+          else
+            echo "❌ Release branch '$SOURCE_BRANCH' has NOT been merged to master yet"
+            echo "Release branches must be merged to master before merging back to develop"
+            echo ""
+            echo "GitFlow Process:"
+            echo "  1. First merge release/* to master"
+            echo "  2. Then merge release/* back to develop to sync changes"
+            exit 1
+          fi
+
+      - name: Comment PR with validation results
+        uses: actions/github-script@v6.4.0
+        if: always()
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const sourceBranch = "${{ github.head_ref }}";
+            const targetBranch = "${{ github.base_ref }}";
+            const conclusion = "${{ job.status }}";
+            
+            if (!sourceBranch.startsWith('release/')) {
+              return;
+            }
+            
+            let output = "";
+            
+            if (conclusion === "success") {
+              output = `### GitFlow Release Branch Validation ✅
+            
+            **Branch Type:** Release
+            **Source Branch:** \`${sourceBranch}\`
+            **Target Branch:** \`${targetBranch}\`
+            
+            `;
+              
+              if (targetBranch === 'master') {
+                output += `✅ Branch follows naming convention \`release/*\`
+            ✅ Branch was created from \`develop\`
+            ✅ Ready to merge to \`master\`
+            
+            **Next Steps After Merge:**
+            1. Open a PR to merge this release branch back to develop`;
+              } else if (targetBranch === 'develop') {
+                output += `✅ Branch follows naming convention \`release/*\`
+            ✅ Release has been merged to \`master\` first
+            ✅ Ready to sync release changes back to \`develop\``;
+              }
+            } else {
+              // Validation failed
+              output = `### GitFlow Release Branch Validation ❌
+            
+            **Branch Type:** Release
+            **Source Branch:** \`${sourceBranch}\`
+            **Target Branch:** \`${targetBranch}\`
+            
+            ❌ **Validation Failed**
+            
+            `;
+              
+              if (targetBranch === 'master') {
+                output += `This release branch was not created from \`develop\`. Release branches must originate from the develop branch.
+            
+            **To fix this:**
+            1. Create a new release branch from develop:
+               \`\`\`bash
+               git checkout develop
+               git pull origin develop
+               git checkout -b release/x.x.x
+               \`\`\`
+            2. Cherry-pick your commits or merge develop into your release branch
+            3. Open a new PR to master
+            
+            **GitFlow Rule:** \`release/*\` → \`master\` (must branch from \`develop\`)`;
+              } else if (targetBranch === 'develop') {
+                output += `This release branch has not been merged to \`master\` yet. You must merge to master first before syncing back to develop.
+            
+            **GitFlow Process:**
+            1. First merge \`${sourceBranch}\` → \`master\`
+            2. Then merge \`${sourceBranch}\` → \`develop\`
+            
+            **GitFlow Rule:** Release branches must merge to \`master\` first, then back to \`develop\``;
+              }
+            }
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
